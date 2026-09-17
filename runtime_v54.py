@@ -249,6 +249,62 @@ def calculate_indicators(df):
         min_periods=14,
     ).mean()
 
+    # ADX / DMI 14 - Wilder style
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = up_move.where(
+        (up_move > down_move) & (up_move > 0),
+        0.0,
+    )
+    minus_dm = down_move.where(
+        (down_move > up_move) & (down_move > 0),
+        0.0,
+    )
+
+    atr_adx = tr.ewm(
+        alpha=1 / 14,
+        adjust=False,
+        min_periods=14,
+    ).mean()
+
+    plus_dm_smoothed = plus_dm.ewm(
+        alpha=1 / 14,
+        adjust=False,
+        min_periods=14,
+    ).mean()
+
+    minus_dm_smoothed = minus_dm.ewm(
+        alpha=1 / 14,
+        adjust=False,
+        min_periods=14,
+    ).mean()
+
+    df["plus_di14"] = (
+        100 * plus_dm_smoothed
+        / atr_adx.replace(0, float("nan"))
+    )
+
+    df["minus_di14"] = (
+        100 * minus_dm_smoothed
+        / atr_adx.replace(0, float("nan"))
+    )
+
+    dx = (
+        100
+        * (df["plus_di14"] - df["minus_di14"]).abs()
+        / (df["plus_di14"] + df["minus_di14"]).replace(
+            0,
+            float("nan"),
+        )
+    )
+
+    df["adx14"] = dx.ewm(
+        alpha=1 / 14,
+        adjust=False,
+        min_periods=14,
+    ).mean()
+
     # Volume
     df["volume_ma20"] = volume.rolling(20).mean()
 
@@ -324,6 +380,9 @@ def timeframe_analysis(symbol, bar):
         "bb_upper": clean_number(last["bb_upper"]),
         "bb_lower": clean_number(last["bb_lower"]),
         "atr14": clean_number(last["atr14"]),
+        "adx14": clean_number(last["adx14"]),
+        "plus_di14": clean_number(last["plus_di14"]),
+        "minus_di14": clean_number(last["minus_di14"]),
         "tsi": clean_number(last["tsi"]),
         "tsi_signal": clean_number(last["tsi_signal"]),
         "tsi_hist": clean_number(last["tsi_hist"]),
@@ -420,7 +479,15 @@ Không tự bịa thêm mức giá hay chỉ báo.
 15m là động lượng ngắn hạn.
 
 Xem xét RSI, EMA20/50/200, MACD, Bollinger Bands,
-ATR, Volume và TSI.
+ATR, Volume, TSI và ADX/DMI.
+
+Dùng ADX14 để đánh giá SỨC MẠNH xu hướng, không dùng ADX
+để tự suy ra hướng tăng/giảm.
+Dùng +DI14 và -DI14 để xác định hướng:
+- +DI14 > -DI14: thiên hướng tăng.
+- -DI14 > +DI14: thiên hướng giảm.
+ADX thấp hoặc DMI xung đột với các timeframe khác phải
+làm giảm độ tin cậy; không được tự động tạo BUY/SELL.
 
 Nếu dữ liệu xung đột hoặc tín hiệu không rõ,
 ưu tiên HOLD.
@@ -760,7 +827,7 @@ def run_advanced_agent(symbol, market=None):
     specialist_jobs = [
         (
             "TECHNICAL_AGENT",
-            "Phân tích 15m/1H/4H, EMA, RSI, MACD, Bollinger, ATR, volume, TSI.",
+            "Phân tích 15m/1H/4H, EMA, RSI, MACD, Bollinger, ATR, volume, TSI và ADX/DMI. ADX14 đo sức mạnh xu hướng; +DI14/-DI14 xác định hướng. So sánh DMI giữa 15m/1H/4H và giảm confidence khi xung đột.",
             market,
             True,
         ),
@@ -937,7 +1004,7 @@ async def run_advanced_agent_pipeline(application, chat_id, symbol, market):
 
     # 6 AI TECHNICAL
     _job_stat_run(6)
-    technical=await ai_job(6,"AI_TECHNICAL",lambda:_specialist("TECHNICAL_AGENT","Phân tích kỹ thuật 15m/1H/4H. Bắt buộc đối chiếu số liệu; không bịa.",{"market":market,"quant":quant,"regime":regime}),lambda r:_unavailable_specialist("TECHNICAL_AGENT",r)); reports.append(technical); _job_stat_result(6, technical.get("data_quality") != "POOR")
+    technical=await ai_job(6,"AI_TECHNICAL",lambda:_specialist("TECHNICAL_AGENT","Phân tích kỹ thuật 15m/1H/4H gồm EMA, RSI, MACD, Bollinger, ATR, Volume, TSI và ADX/DMI. ADX14 đo sức mạnh xu hướng; +DI14/-DI14 xác định hướng. So sánh DMI giữa 15m/1H/4H, đối chiếu quant/regime và giảm confidence khi dữ liệu xung đột. Bắt buộc đối chiếu số liệu; không bịa.",{"market":market,"quant":quant,"regime":regime}),lambda r:_unavailable_specialist("TECHNICAL_AGENT",r)); reports.append(technical); _job_stat_result(6, technical.get("data_quality") != "POOR")
     # 7 AI ORDERBOOK
     _job_stat_run(7)
     orderbook=await ai_job(7,"AI_MICROSTRUCTURE_ORDERBOOK",lambda:_specialist("ORDERBOOK_AGENT","Phân tích spread, depth, imbalance, liquidity. Không suy diễn dữ liệu thiếu.",book),lambda r:_unavailable_specialist("ORDERBOOK_AGENT",r)); reports.append(orderbook)
