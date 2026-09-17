@@ -982,7 +982,7 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     text = (
-        "🤖 OKX AI Agent V5.3 — 15 JOBS\n\n"
+        "🤖 OKX AI Agent V8 — 15 JOBS\n\n"
         "Lệnh:\n"
         "/status - trạng thái bot\n"
         "/price BTC-USDT - giá hiện tại\n"
@@ -995,7 +995,7 @@ async def start(
         "/closepaper - đóng paper position thủ công\n"
         "/auto BTC-USDT - BẬT tự động paper trading\n"
         "/autostatus - xem lãi/lỗ và trạng thái auto\n"
-        "/performance - thống kê PAPER V5\n"
+        "/performance - thống kê PAPER V8\n"
         "/jobstats - PASS/RUN của 15 jobs\n"
         "/stopauto - dừng tự động\n\n"
         "⚠️ Phiên bản này KHÔNG gửi lệnh tới OKX."
