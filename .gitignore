@@ -1,10 +1,2 @@
-
-.env
-.env.*
-__pycache__/
-*.pyc
-
-.env
-.env.*
 __pycache__/
 *.pyc
