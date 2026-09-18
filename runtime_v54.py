@@ -552,6 +552,8 @@ def ask_gemini(symbol, market):
 
 # ============================================================
 # ADVANCED MULTI-AGENT CORE — PAPER ONLY
+# V8.1 calibration: evidence-first Critic/Master prompts.
+# Hard Risk Engine is intentionally unchanged (min confidence 70, 1% risk, ATR/SL/RR).
 # AI has NO authority over money, sizing, SL/TP, or hard risk limits.
 # ============================================================
 
@@ -797,7 +799,9 @@ def _critic(symbol, reports):
 Chỉ dùng REPORTS và MEMORY_CONTEXT được cung cấp. Hãy:
 1) đối chiếu Technical vs Orderbook vs Derivatives; 2) tìm bằng chứng ngược chiều;
 3) phát hiện dữ liệu thiếu/cũ/yếu; 4) phát hiện confidence quá cao;
-5) nêu rõ điều gì có thể làm luận điểm hiện tại sai; 6) ưu tiên HOLD khi bằng chứng chưa đủ.
+5) nêu rõ điều gì có thể làm luận điểm hiện tại sai; 6) phân biệt rõ "thiếu dữ liệu" với "bất đồng/không chắc chắn". Chỉ đặt needs_more_data=true khi có dữ liệu thực sự thiếu, POOR, UNAVAILABLE, stale hoặc không đủ để kiểm chứng; KHÔNG dùng needs_more_data chỉ vì thị trường có rủi ro hoặc vì muốn thận trọng.
+7) recommended_caution=HIGH phải có counter-evidence cụ thể trong cycle hiện tại; nếu 3 specialist cùng hướng, data_quality tốt và không có counter-evidence mạnh, không được mặc định HIGH chỉ để an toàn.
+8) HOLD là lựa chọn hợp lệ khi evidence xung đột/yếu/thiếu, nhưng không được mặc định HOLD khi các specialist độc lập đồng thuận rõ.
 Memory chỉ là lịch sử tham khảo, không được lấn át dữ liệu cycle hiện tại.
 Không quyết định tiền/size/risk %/SL/TP và không được sửa Risk Engine.
 REPORTS: {json.dumps(reports,ensure_ascii=False)}
@@ -819,7 +823,12 @@ Tổng hợp specialist SAU KHI đọc phản biện của Critic. Không đư�
 BUY/SELL/HOLD chỉ là quyết định HƯỚNG. SELL chỉ có nghĩa đóng BUY đang có, tuyệt đối không mở short.
 Memory/reflection chỉ giúp nhận ra mẫu lặp lại; dữ liệu cycle hiện tại luôn ưu tiên hơn lịch sử.
 Không quyết định tiền, size, risk %, SL/TP. Python Validator + Risk Engine có quyền ALLOW/BLOCK cuối cùng.
-Nếu evidence xung đột/yếu/thiếu hoặc Critic yêu cầu thêm dữ liệu => ưu tiên HOLD và giảm confidence.
+Hiệu chỉnh quyết định theo evidence hiện tại:
+- Không mặc định HOLD chỉ vì Critic có caution. Caution là bằng chứng cần cân nhắc, không phải quyền phủ quyết.
+- Nếu 3 specialist cùng BULLISH, đều có confidence > 0, data_quality không POOR, và Critic không chỉ ra dữ liệu thực sự thiếu/counter-evidence mạnh, phải đánh giá BUY một cách thực chất; HOLD trong trường hợp này phải nêu rõ counter-evidence cụ thể.
+- Confidence là độ mạnh bằng chứng cho quyết định, không phải xác suất thắng. Không cố tình giữ confidence dưới ngưỡng Risk Engine và không biết/không tối ưu theo ngưỡng Risk Engine.
+- Nếu evidence xung đột/yếu/thiếu thực sự hoặc Critic needs_more_data=true vì dữ liệu thiếu/POOR/UNAVAILABLE => ưu tiên HOLD và giảm confidence.
+- SELL chỉ đóng BUY Spot hiện có; không mở short.
 REPORTS: {json.dumps(reports,ensure_ascii=False)}
 CRITIC: {json.dumps(critic,ensure_ascii=False)}
 MEMORY_CONTEXT: {json.dumps(memory,ensure_ascii=False)}
