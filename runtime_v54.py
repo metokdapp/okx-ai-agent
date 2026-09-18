@@ -28,6 +28,36 @@ logging.basicConfig(
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Independent Performance Agent #2 — fail-forward only.
+AGENT2_URL = os.getenv("AGENT2_URL", "").rstrip("/")
+AGENT2_INGEST_KEY = os.getenv("AGENT2_INGEST_KEY", "")
+
+
+def send_cycle_to_agent2(raw_report, snapshot=None):
+    """Best-effort audit copy. Agent #2 must never stop V8."""
+    if not AGENT2_URL or not AGENT2_INGEST_KEY:
+        return False
+
+    try:
+        r = requests.post(
+            f"{AGENT2_URL}/v8/cycle",
+            headers={"X-Agent2-Key": AGENT2_INGEST_KEY},
+            json={
+                "source": "V8",
+                "raw_report": raw_report,
+                "snapshot": snapshot or {},
+            },
+            timeout=8,
+        )
+        r.raise_for_status()
+        return True
+    except Exception as exc:
+        logging.warning(
+            "AGENT2 FAIL-FORWARD: %s",
+            type(exc).__name__,
+        )
+        return False
+
 OKX_BASE_URL = "https://www.okx.com"
 OKX_TICKER_URL = f"{OKX_BASE_URL}/api/v5/market/ticker"
 OKX_CANDLES_URL = f"{OKX_BASE_URL}/api/v5/market/candles"
@@ -1888,6 +1918,20 @@ async def auto_trading_loop(application, chat_id):
                             summary_text = summary_text
                             AUTO_STATE["cycle_count"] += 1
                             await send_auto_message(application, chat_id, summary_text)
+
+                            # Independent audit copy. Never affects V8 execution.
+                            try:
+                                await asyncio.to_thread(
+                                    send_cycle_to_agent2,
+                                    summary_text,
+                                    {},
+                                )
+                            except Exception as exc:
+                                logging.warning(
+                                    "AGENT2 CONNECTOR FAIL-FORWARD: %s",
+                                    type(exc).__name__,
+                                )
+
                             _job_stat_result(15, True)
                             _touch_progress("V5:15/15:SUMMARY:DONE")
                         except Exception as exc:
