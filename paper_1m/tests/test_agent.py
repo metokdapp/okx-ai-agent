@@ -191,6 +191,31 @@ class ModelFallbackTests(unittest.TestCase):
         self.assertEqual(self.b.s['last_decision']['action'],'HOLD')
         self.assertIsNone(self.b.s['position'])
 
+class ModelConfigTests(unittest.TestCase):
+    def test_key_in_model_field_is_not_echoed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            book=Book(Path(directory)/'test.db',Config())
+            fake='AQ.FAKE_SECRET_FOR_TEST_ONLY'
+            with patch.dict('os.environ',{'GEMINI_MODEL':fake,'GEMINI_MODELS':''}):
+                with self.assertLogs('paper',level='WARNING') as logs:
+                    bot=Agent(Config(),book)
+            self.assertNotIn(fake,bot.report())
+            self.assertNotIn(fake,' '.join(logs.output))
+            self.assertEqual(bot.models,['gemini-3.8-flash','gemini-3.7-flash','gemini-3.6-flash'])
+            book.db.close()
+    def test_bad_model_list_and_legacy_state_are_hidden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            book=Book(Path(directory)/'test.db',Config())
+            fake='AQ.FAKE_SECRET_FOR_TEST_ONLY'
+            book.s['ai_last_model']=fake
+            book.s['ai_last_error']=fake+': HTTP_404'
+            with patch.dict('os.environ',{'GEMINI_MODELS':fake}):
+                with self.assertLogs('paper',level='WARNING'):
+                    bot=Agent(Config(),book)
+            self.assertNotIn(fake,bot.report())
+            self.assertEqual(len(bot.models),3)
+            book.db.close()
+
 class CandleTests(unittest.TestCase):
     def rows(self):
         return [[str(i*60000),'100','101','99','100','10','0','0','1'] for i in range(200)]

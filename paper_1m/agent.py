@@ -360,9 +360,17 @@ class Agent:
         configured = os.getenv('GEMINI_MODELS','').strip()
         primary = os.getenv('GEMINI_MODEL',DEFAULT_MODELS[0]).strip()
         names = configured.split(',') if configured else [primary,*DEFAULT_MODELS]
-        self.models = list(dict.fromkeys(n.strip() for n in names if n.strip()))
-        if not self.models or len(self.models) > 8 or any(not re.fullmatch(r'[a-zA-Z0-9._-]+',n) for n in self.models):
-            raise ValueError('Invalid GEMINI_MODELS')
+        # Never echo arbitrary env values: a key may be pasted into the model field.
+        valid = [n.strip() for n in names if re.fullmatch(r'gemini-[a-z0-9][a-z0-9.-]{0,55}',n.strip())]
+        if len(valid) != len(names):
+            LOG.warning('Invalid Gemini model setting ignored (value hidden); put the API key in GEMINI_API_KEY')
+        self.models = list(dict.fromkeys(valid))[:8] or list(DEFAULT_MODELS)
+        if not re.fullmatch(r'gemini-[a-z0-9][a-z0-9.-]{0,55}',book.s.get('ai_last_model','')):
+            book.s.pop('ai_last_model',None)
+        previous_error = book.s.get('ai_last_error','')
+        if previous_error and not re.fullmatch(r'gemini-[a-z0-9][a-z0-9.-]{0,55}: [A-Z0-9_]+',previous_error):
+            book.s['ai_last_error'] = 'Lỗi cấu hình trước đó (đã ẩn giá trị)'
+
 
     def fresh(self):
         return self.quote is not None and -2 <= time.time()-self.quote['ts'] <= 10
