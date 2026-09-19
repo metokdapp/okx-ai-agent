@@ -305,9 +305,9 @@ class Agent:
         self.market_error = None
         self.last_market_ok = 0
         self.token = os.getenv('TELEGRAM_BOT_TOKEN','').strip()
-        self.chat = os.getenv('TELEGRAM_CHAT_ID','').strip()
-        if self.chat and not re.fullmatch(r'[1-9][0-9]*',self.chat):
-            raise ValueError('Use your private Telegram chat ID (positive integer)')
+        self.chat = book.s.get('telegram_chat_id','')
+        if self.token and not self.chat:
+            LOG.info('TELEGRAM SETUP: Nhắn /start trong chat riêng để liên kết tài khoản đầu tiên.')
         self.ai_key = os.getenv('GEMINI_API_KEY','').strip()
         self.model = os.getenv('GEMINI_MODEL','gemini-3.8-flash').strip()
 
@@ -428,6 +428,18 @@ class Agent:
             raise ValueError('Telegram API failed')
         return result['result']
 
+    def pair_telegram(self, sender, chat_type, text):
+        """First private /start binds the recipient once, as requested by the owner."""
+        parts = text.split()
+        if (self.chat or not self.token or chat_type != 'private'
+                or not re.fullmatch(r'[1-9][0-9]*',sender)
+                or not parts or parts[0].split('@')[0] != '/start'):
+            return False
+        self.book.s['telegram_chat_id'] = sender
+        self.book.save()  # Durable binding before enabling report delivery.
+        self.chat = sender
+        return True
+
     async def commands(self):
         if not self.token:
             return
@@ -442,10 +454,12 @@ class Agent:
                     text = msg.get('text','').strip()
                     sender = str(chat.get('id',''))
                     private = chat.get('type') == 'private'
-                    # Only reveals the requester's OWN ID. No financial data or state changes.
-                    if private and text.split(' ')[0].split('@')[0] in {'/start','/whoami'} and not self.chat:
+                    if self.pair_telegram(sender,chat.get('type'),text):
                         await self.telegram('sendMessage',{'chat_id':sender,'text':
-                            'Chat ID của bạn: '+sender+'\nNhập TELEGRAM_CHAT_ID này trên Railway để nhận báo cáo. Chưa liên kết tài khoản.'})
+                            '✅ Đã liên kết Telegram. Bot tự lưu nơi nhận báo cáo; không cần nhập Chat ID.\n'+self.report()})
+                    elif private and text.split(' ')[0].split('@')[0] in {'/start','/whoami'} and not self.chat:
+                        await self.telegram('sendMessage',{'chat_id':sender,'text':
+                            'Chưa liên kết. Gửi /start trong chat riêng để nhận báo cáo.'})
                     elif private and self.chat and sender == self.chat:
                         cmd = text.split(' ')[0].split('@')[0]
                         response = None

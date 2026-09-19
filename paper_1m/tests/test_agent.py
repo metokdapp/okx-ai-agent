@@ -96,6 +96,35 @@ class PaperTests(unittest.TestCase):
         self.assertEqual(other.db.execute('SELECT text FROM outbox').fetchone()[0],'pending')
         other.db.close()
 
+class PairingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name)/'pair.db'
+        self.b = Book(self.path,Config())
+        self.env = patch.dict('os.environ', {'TELEGRAM_BOT_TOKEN':'test-token'})
+        self.env.start()
+        self.bot = Agent(Config(),self.b)
+    def tearDown(self):
+        self.env.stop()
+        self.b.db.close()
+        self.tmp.cleanup()
+    def test_only_private_start_binds(self):
+        for kind,text in [('private','/status'),('private','hello'),('group','/start')]:
+            self.assertFalse(self.bot.pair_telegram('123',kind,text))
+        self.assertFalse(self.bot.chat)
+        self.assertTrue(self.bot.pair_telegram('123','private','/start'))
+    def test_pair_persists_and_cannot_be_replaced(self):
+        self.assertTrue(self.bot.pair_telegram('123','private','/start'))
+        self.assertFalse(self.bot.pair_telegram('456','private','/start'))
+        other = Book(self.path,Config())
+        restored = Agent(Config(),other)
+        self.assertEqual(restored.chat,'123')
+        other.db.close()
+    def test_no_token_or_invalid_sender_cannot_bind(self):
+        self.assertFalse(self.bot.pair_telegram('-123','private','/start'))
+        self.bot.token = ''
+        self.assertFalse(self.bot.pair_telegram('123','private','/start'))
+
 class CandleTests(unittest.TestCase):
     def rows(self):
         return [[str(i*60000),'100','101','99','100','10','0','0','1'] for i in range(200)]

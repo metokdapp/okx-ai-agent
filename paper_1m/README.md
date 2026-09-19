@@ -14,11 +14,10 @@ Bot mô phỏng BTC-USDT Spot với **1.000 USDT giả**, Gemini phân tích n�
 | Biến | Nội dung |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Token bot riêng do bạn nhập |
-| `TELEGRAM_CHAT_ID` | ID cuộc trò chuyện riêng của chính bạn |
 | `GEMINI_API_KEY` | API key Gemini do bạn nhập |
 | `GEMINI_MODEL` | Mặc định `gemini-3.8-flash`; chọn model có quyền truy cập và hỗ trợ generateContent + JSON |
 
-Nhập token Telegram trước, mở bot và gửi `/start`: bot trả về **ID của chính người nhắn**, chưa liên kết tự động. Nhập ID đó vào `TELEGRAM_CHAT_ID` rồi redeploy. Các lệnh xem tài khoản và điều khiển chỉ nhận từ chat riêng có ID trùng biến này. Dùng token riêng, không chạy bot Telegram khác với cùng token (polling sẽ xung đột).
+Telegram chỉ cần `TELEGRAM_BOT_TOKEN`. Sau khi deploy, mở bot và nhắn riêng `/start`. **Tài khoản đầu tiên nhắn `/start` sẽ được liên kết**, vì vậy chính bạn phải nhắn trước; bot không thể xác minh đó là chủ token. Không cần Chat ID hay mã ghép nối. Bot lưu người nhận vào SQLite trên volume, giữ liên kết sau redeploy và không cho tài khoản khác ghi đè. Không chia sẻ tên bot trước khi liên kết. Dùng token riêng, không chạy bot Telegram khác với cùng token (polling sẽ xung đột). Nếu xóa DB/volume, việc liên kết đầu tiên sẽ bắt đầu lại.
 
 Thiếu hoặc lỗi key AI: giữ HOLD, không dùng chỉ báo giả làm AI. Nhập key và redeploy để bắt đầu quyết định từ nến mới. Key Telegram không thay thế key AI. Chi phí Railway và API AI là chi phí thật dù vốn giao dịch là giả; một lần phân tích mỗi phút có thể đạt 1.440 lần/ngày. `AI_DAILY_LIMIT` giới hạn số lần gọi, không phải giới hạn chi tiêu tiền.
 
