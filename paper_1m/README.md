@@ -7,7 +7,7 @@ Bot mô phỏng BTC-USDT Spot với **1.000 USDT giả**, Gemini phân tích n�
 - Dockerfile dùng Python 3.12, chỉ thư viện chuẩn, không cần pip.
 - Chạy **một replica**, tắt sleep/serverless, không đặt cron.
 - Gắn persistent volume tại `/data`, đặt `DATA_DIR=/data`. SQLite lưu tiền, vị thế, quyết định AI, lịch sử và hàng đợi Telegram. Không xóa volume khi redeploy.
-- Nếu triển khai từ thư mục `paper_1m` trong repo: đặt Root Directory là `/paper_1m`, config path `/paper_1m/railway.toml`.
+- Nếu triển khai từ thư mục `paper_1m` trong repo: đặt Root Directory là `/paper_1m`, start command `python agent.py`, Dockerfile `Dockerfile`, healthcheck `/health` (cấu hình trực tiếp trong Railway).
 - Healthcheck `/health` là kiểm tra tiến trình; `market_fresh` cho biết dữ liệu mới, không coi HTTP 200 là đã kết nối đầy đủ AI/Telegram.
 - Nhập các biến bên dưới và deploy. Không commit key vào GitHub.
 
@@ -15,7 +15,7 @@ Bot mô phỏng BTC-USDT Spot với **1.000 USDT giả**, Gemini phân tích n�
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Token bot riêng do bạn nhập |
 | `GEMINI_API_KEY` | API key Gemini do bạn nhập |
-| `GEMINI_MODEL` | Mặc định `gemini-3.8-flash`; chọn model có quyền truy cập và hỗ trợ generateContent + JSON |
+| `GEMINI_MODELS` | `gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash`; danh sách dự phòng đã cấu hình sẵn |
 
 Telegram chỉ cần `TELEGRAM_BOT_TOKEN`. Sau khi deploy, mở bot và nhắn riêng `/start`. **Tài khoản đầu tiên nhắn `/start` sẽ được liên kết**, vì vậy chính bạn phải nhắn trước; bot không thể xác minh đó là chủ token. Không cần Chat ID hay mã ghép nối. Bot lưu người nhận vào SQLite trên volume, giữ liên kết sau redeploy và không cho tài khoản khác ghi đè. Không chia sẻ tên bot trước khi liên kết. Dùng token riêng, không chạy bot Telegram khác với cùng token (polling sẽ xung đột). Nếu xóa DB/volume, việc liên kết đầu tiên sẽ bắt đầu lại.
 
@@ -55,7 +55,7 @@ Chỉ một vị thế. Sau thoát lệnh chờ ít nhất 60 giây. Chặn mua 
 
 Python tính EMA20/50, RSI14 Wilder, MACD(12,26,9), ATR14 Wilder và volume ratio. Chỉ nhận nến OKX `confirm=1`, kiểm tra trùng, khoảng trống và độ mới. Đánh dấu nến trong DB **trước** khi gọi AI, tránh lệnh lặp sau restart; nến bị lỗi có thể bị bỏ qua, không phát lại tín hiệu cũ.
 
-AI chạy độc lập với vòng giá, deadline mạng 25 giây. Quyết định quá 50 giây sau thời điểm đóng nến bị loại. Giá phải mới trong 10 giây. Giá lấy tối đa khoảng mỗi giây khi API đáp ứng; đây không phải luồng tick đầy đủ. BUY khớp theo ask cộng trượt giá, SELL theo bid trừ trượt giá; tính phí hai chiều. SL kiểm tra bid, nếu gap thì khớp theo giá hiện tại, không giả vờ khớp đúng mức SL.
+AI chạy độc lập với vòng giá; mỗi model có timeout tối đa 12 giây, dùng chung hạn chót 50 giây sau nến đóng. Quyết định quá 50 giây sau thời điểm đóng nến bị loại. Giá phải mới trong 10 giây. Giá lấy tối đa khoảng mỗi giây khi API đáp ứng; đây không phải luồng tick đầy đủ. BUY khớp theo ask cộng trượt giá, SELL theo bid trừ trượt giá; tính phí hai chiều. SL kiểm tra bid, nếu gap thì khớp theo giá hiện tại, không giả vờ khớp đúng mức SL.
 
 PnL đã chốt tính sau phí; equity và PnL tổng gồm vị thế đang mở theo giá bid và phí thoát dự kiến. Max drawdown đo trên equity quan sát được, không phải mọi tick. Không tái tạo chạm SL/TP trong thời gian bot mất mạng/tắt máy. Telegram có outbox bền vững, retry; nếu Telegram đã nhận tin nhưng kết nối mất trước ACK thì có thể trùng tin. Giữ tối đa 100 thông báo chờ để không tích tụ vô hạn.
 
@@ -75,3 +75,11 @@ Chạy local: xuất biến môi trường cần thiết rồi `python agent.py`
 - Gemini: https://ai.google.dev/api/generate-content — JSON response schema.
 - Telegram: https://core.telegram.org/bots/api — polling và sendMessage.
 - Railway: https://docs.railway.com/volumes — lưu dữ liệu qua deploy.
+
+## Gemini nhiều model
+
+Một API key, thử tuần tự danh sách `GEMINI_MODELS`. Model trả kết quả thành công gần nhất được ưu tiên ở chu kỳ sau. HTTP 403/404: nghỉ model 6 giờ; lỗi yêu cầu 400: 1 giờ; lỗi tạm thời/JSON/timeout: 60 giây. Lỗi 429: chờ ít nhất 15 phút hoặc Retry-After/retryDelay nếu dài hơn, hạn mức ngày chờ bảo thủ 24 giờ. Chỉ chuyển model ngay khi quota error xác định rõ phạm vi riêng model; lỗi quota chung/không rõ phạm vi dừng cả danh sách. Key sai/hết hạn hoặc project bị khóa: nghỉ toàn bộ 1 giờ. Thời gian chờ được lưu qua restart.
+
+Mỗi lần thử model, kể cả lỗi, đều tính vào `AI_DAILY_LIMIT` tổng chung. Không đổi API key/project để vượt quota. Hết model hoặc hết thời gian thì HOLD; SL/TP vẫn được vòng giá kiểm tra. Báo cáo Telegram hiển thị model thành công gần nhất, danh sách dự phòng và lỗi model gần nhất (lịch sử; có thể đã hồi phục).
+
+Các model mặc định có Free Tier theo bảng giá Google khi cấu hình, nhưng miễn phí phụ thuộc tier của **project API**. Nếu project bật billing, cùng model có thể bị tính phí; bot không thể bảo đảm miễn phí hoặc tự xác định tier từ key. Dùng project Free Tier nếu chỉ muốn miễn phí. Hạn mức miễn phí có thể không đủ phân tích 1.440 nến/ngày; bot sẽ HOLD khi hết quota. Xem https://ai.google.dev/gemini-api/docs/pricing và https://ai.google.dev/gemini-api/docs/rate-limits.

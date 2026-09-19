@@ -1,11 +1,13 @@
 import asyncio
 import json
+import io
+import urllib.error
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
-from agent import Config, Book, Agent, indicators, closed_candles, validate_quote, parse_decision
+from agent import Config, Book, Agent, AIUnavailable, indicators, closed_candles, validate_quote, parse_decision
 
 class PaperTests(unittest.TestCase):
     def setUp(self):
@@ -79,6 +81,7 @@ class PaperTests(unittest.TestCase):
     def test_ai_failure_does_not_buy(self):
         bot = Agent(self.c,self.b)
         bot.quote = self.q
+        bot.ai_key = "test-key"
         with patch('agent.ask_ai',new=AsyncMock(side_effect=ValueError('bad'))):
             asyncio.run(bot.analyze(int(time.time())-60,{'1m':{'atr14':1}}))
         self.assertIsNone(self.b.s['position'])
@@ -86,6 +89,7 @@ class PaperTests(unittest.TestCase):
     def test_expired_decision_does_not_buy(self):
         bot = Agent(self.c,self.b)
         bot.quote = self.q
+        bot.ai_key = "test-key"
         answer = {'action':'BUY','confidence':90,'reason':'x'}
         with patch('agent.ask_ai',new=AsyncMock(return_value=answer)):
             asyncio.run(bot.analyze(int(time.time())-120,{'1m':{'atr14':1}}))
@@ -124,6 +128,68 @@ class PairingTests(unittest.TestCase):
         self.assertFalse(self.bot.pair_telegram('-123','private','/start'))
         self.bot.token = ''
         self.assertFalse(self.bot.pair_telegram('123','private','/start'))
+
+class ModelFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.b = Book(Path(self.tmp.name)/'models.db',Config())
+        self.bot = Agent(Config(),self.b)
+        self.bot.ai_key = 'test-key'
+        self.bot.models = ['model-a','model-b','model-c']
+        self.candle = int(time.time())-60
+        self.answer = {'action':'HOLD','confidence':50,'reason':'test'}
+    def tearDown(self):
+        self.b.db.close()
+        self.tmp.cleanup()
+    def error(self,status,body=None):
+        return urllib.error.HTTPError('https://example.invalid',status,'error',{},io.BytesIO(json.dumps(body or {}).encode()))
+    def test_404_fallback_and_sticky_success(self):
+        mock = AsyncMock(side_effect=[self.error(404),self.answer,self.answer])
+        with patch('agent.ask_ai',new=mock):
+            result=asyncio.run(self.bot.ai_decision(self.candle,{}))
+            self.assertEqual(result['model'],'model-b')
+            asyncio.run(self.bot.ai_decision(self.candle,{}))
+        self.assertEqual([c.args[2] for c in mock.await_args_list],['model-a','model-b','model-b'])
+        self.assertEqual(self.b.s['ai_calls'],3)
+    def test_unknown_quota_stops_all_models_and_persists(self):
+        mock=AsyncMock(side_effect=self.error(429))
+        with patch('agent.ask_ai',new=mock):
+            with self.assertRaises(AIUnavailable): asyncio.run(self.bot.ai_decision(self.candle,{}))
+            with self.assertRaises(AIUnavailable): asyncio.run(self.bot.ai_decision(self.candle,{}))
+        self.assertEqual(mock.await_count,1)
+        self.assertGreater(self.b.s['ai_global_until'],time.time())
+    def test_model_specific_quota_uses_next_model(self):
+        body={'error':{'details':[{'violations':[{'quotaId':'RequestsPerDay','quotaDimensions':{'model':'model-a'}}]}]}}
+        mock=AsyncMock(side_effect=[self.error(429,body),self.answer])
+        with patch('agent.ask_ai',new=mock):
+            result=asyncio.run(self.bot.ai_decision(self.candle,{}))
+        self.assertEqual(result['model'],'model-b')
+        self.assertGreater(self.b.s['ai_cooldowns']['model-a'],time.time()+86000)
+    def test_invalid_key_stops_all(self):
+        body={'error':{'details':[{'reason':'API_KEY_INVALID'}]}}
+        mock=AsyncMock(side_effect=self.error(400,body))
+        with patch('agent.ask_ai',new=mock):
+            with self.assertRaises(AIUnavailable): asyncio.run(self.bot.ai_decision(self.candle,{}))
+        self.assertEqual(mock.await_count,1)
+    def test_budget_counts_fallback_attempts(self):
+        self.bot.c.ai_daily_limit=1
+        mock=AsyncMock(side_effect=self.error(404))
+        with patch('agent.ask_ai',new=mock):
+            with self.assertRaises(AIUnavailable): asyncio.run(self.bot.ai_decision(self.candle,{}))
+        self.assertEqual(mock.await_count,1)
+        self.assertEqual(self.b.s['ai_calls'],1)
+    def test_deadline_does_not_send_stale_request(self):
+        mock=AsyncMock(return_value=self.answer)
+        with patch('agent.ask_ai',new=mock):
+            with self.assertRaises(AIUnavailable): asyncio.run(self.bot.ai_decision(int(time.time())-120,{}))
+        self.assertEqual(mock.await_count,0)
+    def test_all_models_failure_holds(self):
+        mock=AsyncMock(side_effect=ValueError('invalid response'))
+        with patch('agent.ask_ai',new=mock):
+            asyncio.run(self.bot.analyze(self.candle,{}))
+        self.assertEqual(mock.await_count,3)
+        self.assertEqual(self.b.s['last_decision']['action'],'HOLD')
+        self.assertIsNone(self.b.s['position'])
 
 class CandleTests(unittest.TestCase):
     def rows(self):

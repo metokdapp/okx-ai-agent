@@ -13,6 +13,7 @@ import re
 import signal
 import sqlite3
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +21,7 @@ from threading import Thread
 
 LOG = logging.getLogger('paper')
 SYMBOL = 'BTC-USDT'
+DEFAULT_MODELS = ('gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash')
 
 
 def number(value, low, high):
@@ -163,7 +165,7 @@ def parse_decision(raw):
     return {'action': raw['action'], 'confidence': confidence, 'reason': reason[:700]}
 
 
-async def ask_ai(snapshot, api_key, model):
+async def ask_ai(snapshot, api_key, model, timeout=12):
     if not api_key:
         raise ValueError('AI key missing')
     if not re.fullmatch(r'[a-zA-Z0-9._-]+', model):
@@ -185,12 +187,58 @@ async def ask_ai(snapshot, api_key, model):
                             'responseMimeType':'application/json','responseSchema':schema}}
     result = await asyncio.to_thread(http_json,
         f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
-        body, {'x-goog-api-key':api_key}, 25)
+        body, {'x-goog-api-key':api_key}, timeout)
     candidate = result['candidates'][0]
     if candidate.get('finishReason') != 'STOP':
         raise ValueError('Incomplete AI response')
     text = ''.join(p.get('text','') for p in candidate['content']['parts'] if not p.get('thought'))
     return parse_decision(json.loads(text))
+
+
+class AIUnavailable(Exception):
+    pass
+
+
+def gemini_failure(error, model):
+    """Return safe label, cooldown seconds and whether the whole key must wait."""
+    if not isinstance(error, urllib.error.HTTPError):
+        return ('TIMEOUT' if isinstance(error, TimeoutError) else 'INVALID_RESPONSE', 60, False)
+    code = error.code
+    try:
+        body = json.loads(error.read(32768)).get('error', {})
+        details = body.get('details', [])
+        reasons = {str(d.get('reason','')) for d in details if isinstance(d,dict)}
+    except (ValueError, AttributeError, TypeError):
+        details, reasons = [], set()
+    if code == 401 or reasons.intersection({'API_KEY_INVALID','API_KEY_EXPIRED','API_KEY_SERVICE_BLOCKED','SERVICE_DISABLED','BILLING_DISABLED'}):
+        return ('KEY_OR_PROJECT_ERROR',3600,True)
+    if code == 429:
+        delay = 900.0
+        try:
+            delay = max(delay, float(error.headers.get('Retry-After',0)))
+        except (ValueError,TypeError,AttributeError):
+            pass
+        violations = []
+        for item in details:
+            if not isinstance(item,dict):
+                continue
+            try:
+                delay = max(delay,float(str(item.get('retryDelay','0s')).removesuffix('s')))
+            except ValueError:
+                pass
+            violations.extend(item.get('violations',[]))
+        # Shared/unknown quota applies to the whole router; do not bypass it by switching.
+        model_scoped = bool(violations) and all(
+            isinstance(v,dict) and v.get('quotaDimensions',{}).get('model') in {model,'models/'+model}
+            for v in violations)
+        if any('perday' in str(v.get('quotaId','')).lower().replace('_','') for v in violations if isinstance(v,dict)):
+            delay = max(delay,86400)
+        return ('QUOTA_MODEL' if model_scoped else 'QUOTA_PROJECT',delay,not model_scoped)
+    if code in (403,404):
+        return ('MODEL_UNAVAILABLE_'+str(code),21600,False)
+    if code == 400:
+        return ('MODEL_REQUEST_400',3600,False)
+    return ('HTTP_'+str(code),60,False)
 
 
 class Book:
@@ -309,7 +357,12 @@ class Agent:
         if self.token and not self.chat:
             LOG.info('TELEGRAM SETUP: Nhắn /start trong chat riêng để liên kết tài khoản đầu tiên.')
         self.ai_key = os.getenv('GEMINI_API_KEY','').strip()
-        self.model = os.getenv('GEMINI_MODEL','gemini-3.8-flash').strip()
+        configured = os.getenv('GEMINI_MODELS','').strip()
+        primary = os.getenv('GEMINI_MODEL',DEFAULT_MODELS[0]).strip()
+        names = configured.split(',') if configured else [primary,*DEFAULT_MODELS]
+        self.models = list(dict.fromkeys(n.strip() for n in names if n.strip()))
+        if not self.models or len(self.models) > 8 or any(not re.fullmatch(r'[a-zA-Z0-9._-]+',n) for n in self.models):
+            raise ValueError('Invalid GEMINI_MODELS')
 
     def fresh(self):
         return self.quote is not None and -2 <= time.time()-self.quote['ts'] <= 10
@@ -332,6 +385,9 @@ class Agent:
             f'Lệnh đóng: {s["trades"]} | Thắng: {s["wins"]} | Max DD: {s["max_dd"]:.2%}',
             'Vị thế: '+(f'{p["qty"]:.8f} BTC | SL {p["stop"]:.2f} | TP {p["target"]:.2f}' if p else 'không'),
             f'AI: {decision["action"]} — {decision["reason"]}',
+            'Model thành công gần nhất: '+s.get('ai_last_model','chưa có'),
+            'Model dự phòng: '+', '.join(self.models),
+            'Lỗi model gần nhất: '+s.get('ai_last_error','không'),
             f'AI hôm nay: {s["ai_calls"]}/{int(c.ai_daily_limit)} | Lỗi tích lũy: {s["ai_failures"]}',
             'Trạng thái: '+('PAUSED' if s['paused'] else 'CHẶN MUA: lỗ ngày' if s['day_halted'] else 'ACTIVE'),
             'Cấu hình AI: '+('đã có key' if self.ai_key else 'CHƯA CÓ GEMINI_API_KEY — HOLD'),
@@ -357,10 +413,47 @@ class Agent:
                 LOG.warning('Market unavailable (%s); trading blocked until fresh quote',type(e).__name__)
             await asyncio.sleep(max(0.1,1-(time.monotonic()-start)))
 
+    async def ai_decision(self, candle_id, snapshot):
+        s = self.book.s
+        if not self.ai_key:
+            raise AIUnavailable('Chưa có GEMINI_API_KEY')
+        if time.time() < s.get('ai_global_until',0):
+            raise AIUnavailable('Đang chờ hạn mức/quyền API toàn project')
+        cooldown = s.setdefault('ai_cooldowns',{})
+        preferred = s.get('ai_last_model')
+        models = sorted(self.models,key=lambda n:n != preferred)
+        for model in models:
+            if cooldown.get(model,0) > time.time():
+                continue
+            remaining = candle_id+110-time.time()
+            if remaining < 2:
+                break
+            if s['ai_calls'] >= self.c.ai_daily_limit:
+                raise AIUnavailable('Đã đạt AI_DAILY_LIMIT gồm cả lần thử dự phòng')
+            s['ai_calls'] += 1
+            self.book.save()  # Every attempt counted durably, including fallback failures.
+            try:
+                result = await ask_ai(snapshot,self.ai_key,model,timeout=min(12,remaining))
+                s['ai_last_model'] = model
+                cooldown.pop(model,None)
+                self.book.save()
+                return {**result,'model':model}
+            except Exception as error:
+                label,delay,global_wait = gemini_failure(error,model)
+                cooldown[model] = time.time()+delay
+                s['ai_last_error'] = model+': '+label
+                if global_wait:
+                    s['ai_global_until'] = time.time()+delay
+                self.book.save(('MODEL_ERROR',{'model':model,'error':label,'cooldown_seconds':delay}))
+                LOG.warning('Gemini %s: %s; cooldown %.0fs',model,label,delay)
+                if global_wait:
+                    break
+        raise AIUnavailable('Không có model sẵn sàng; '+s.get('ai_last_error','đã hết thời gian phân tích'))
+
     async def analyze(self, candle_id, snapshot):
         s = self.book.s
         try:
-            decision = await ask_ai(snapshot,self.ai_key,self.model)
+            decision = await self.ai_decision(candle_id,snapshot)
             if time.time()-(candle_id+60) > 50:
                 raise ValueError('Decision expired')
             s['last_decision'] = decision
@@ -380,7 +473,7 @@ class Agent:
                 self.book.buy(q,snapshot['1m']['atr14'],decision['reason'])
         except Exception as e:
             s['ai_failures'] += 1
-            s['last_decision'] = {'action':'HOLD','reason':'AI lỗi/chậm: '+type(e).__name__}
+            s['last_decision'] = {'action':'HOLD','reason':str(e) if isinstance(e,AIUnavailable) else 'AI lỗi/chậm: '+type(e).__name__}
             self.book.save(('AI_ERROR',{'type':type(e).__name__}))
             LOG.warning('AI HOLD (%s)',type(e).__name__)
 
@@ -414,8 +507,6 @@ class Agent:
                         'position':s['position'], 'fee_per_side':self.c.fee,
                         'slippage_per_side':self.c.slippage,
                         'spread':(self.quote['ask']-self.quote['bid'])/self.quote['bid']}
-                    s['ai_calls'] += 1
-                    self.book.save()
                     self.ai_task = asyncio.create_task(self.analyze(candle_id,snapshot))
             except Exception as e:
                 LOG.warning('Candle analysis skipped (%s)',type(e).__name__)
